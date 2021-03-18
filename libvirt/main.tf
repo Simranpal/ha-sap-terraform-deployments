@@ -25,6 +25,7 @@ locals {
   hana_cluster_vip_secondary = var.hana_cluster_vip_secondary != "" ? var.hana_cluster_vip_secondary : cidrhost(local.iprange, local.hana_ip_start + var.hana_count + 1)
 
   # 2 is hardcoded for drbd because we always deploy 2 machines
+  drbd_enabled     = var.shared_storage_enabled && shared_storage_type == "drbd"
   drbd_ip_start    = 20
   drbd_ips         = length(var.drbd_ips) != 0 ? var.drbd_ips : [for ip_index in range(local.drbd_ip_start, local.drbd_ip_start + 2) : cidrhost(local.iprange, ip_index)]
   drbd_cluster_vip = var.drbd_cluster_vip != "" ? var.drbd_cluster_vip : cidrhost(local.iprange, local.drbd_ip_start + 2)
@@ -39,7 +40,7 @@ locals {
 
   # Check if iscsi server has to be created
   use_sbd       = var.hana_cluster_fencing_mechanism == "sbd" || var.drbd_cluster_fencing_mechanism == "sbd" || var.netweaver_cluster_fencing_mechanism == "sbd"
-  iscsi_enabled = var.sbd_storage_type == "iscsi" && ((var.hana_count > 1 && var.hana_ha_enabled) || var.drbd_enabled || (local.netweaver_count > 1 && var.netweaver_ha_enabled)) && local.use_sbd ? true : false
+  iscsi_enabled = var.sbd_storage_type == "iscsi" && ((var.hana_count > 1 && var.hana_ha_enabled) || local.drbd_enabled || (local.netweaver_count > 1 && var.netweaver_ha_enabled)) && local.use_sbd ? true : false
 }
 
 module "common_variables" {
@@ -98,7 +99,7 @@ module "common_variables" {
   netweaver_swpm_sar                  = var.netweaver_swpm_sar
   netweaver_sapexe_folder             = var.netweaver_sapexe_folder
   netweaver_additional_dvds           = var.netweaver_additional_dvds
-  netweaver_nfs_share                 = var.drbd_enabled ? "${local.drbd_cluster_vip}:/${var.netweaver_sid}" : var.netweaver_nfs_share
+  netweaver_nfs_share                 = local.drbd_enabled ? "${local.drbd_cluster_vip}:/${var.netweaver_sid}" : var.netweaver_nfs_share
   netweaver_sapmnt_path               = var.netweaver_sapmnt_path
   netweaver_hana_ip                   = var.hana_ha_enabled ? local.hana_cluster_vip : element(local.hana_ips, 0)
   netweaver_hana_sid                  = var.hana_sid
@@ -145,30 +146,6 @@ module "hana_node" {
   iscsi_srv_ip          = module.iscsi_server.output_data.private_addresses.0
 }
 
-module "drbd_node" {
-  source                = "./modules/drbd_node"
-  common_variables      = module.common_variables.configuration
-  name                  = "drbd"
-  source_image          = var.drbd_source_image
-  volume_name           = var.drbd_source_image != "" ? "" : (var.drbd_volume_name != "" ? var.drbd_volume_name : local.generic_volume_name)
-  drbd_count            = var.drbd_enabled == true ? 2 : 0
-  vcpu                  = var.drbd_node_vcpu
-  memory                = var.drbd_node_memory
-  bridge                = "br0"
-  host_ips              = local.drbd_ips
-  drbd_cluster_vip      = local.drbd_cluster_vip
-  drbd_disk_size        = var.drbd_disk_size
-  fencing_mechanism     = var.drbd_cluster_fencing_mechanism
-  sbd_storage_type      = var.sbd_storage_type
-  sbd_disk_id           = module.drbd_sbd_disk.id
-  iscsi_srv_ip          = module.iscsi_server.output_data.private_addresses.0
-  isolated_network_id   = local.internal_network_id
-  isolated_network_name = local.internal_network_name
-  storage_pool          = var.storage_pool
-  nfs_mounting_point    = var.drbd_nfs_mounting_point
-  nfs_export_name       = var.netweaver_sid
-}
-
 module "monitoring" {
   source                = "./modules/monitoring"
   common_variables      = module.common_variables.configuration
@@ -184,7 +161,7 @@ module "monitoring" {
   isolated_network_name = local.internal_network_name
   monitoring_srv_ip     = local.monitoring_srv_ip
   hana_targets          = concat(local.hana_ips, var.hana_ha_enabled ? [local.hana_cluster_vip] : [local.hana_ips[0]]) # we use the vip for HA scenario and 1st hana machine for non HA to target the active hana instance
-  drbd_targets          = var.drbd_enabled ? local.drbd_ips : []
+  drbd_targets          = local.drbd_enabled ? local.drbd_ips : []
   netweaver_targets     = local.netweaver_virtual_ips
 }
 
@@ -207,4 +184,28 @@ module "netweaver_node" {
   shared_disk_id        = module.netweaver_shared_disk.id
   iscsi_srv_ip          = module.iscsi_server.output_data.private_addresses.0
   netweaver_inst_media  = var.netweaver_inst_media
+}
+
+module "shared_storage" {
+  source                         = "./modules/shared_storage"
+  common_variables               = module.common_variables.configuration
+  name                           = "shared-storage"
+  source_image                   = var.drbd_source_image
+  volume_name                    = var.drbd_source_image != "" ? "" : (var.drbd_volume_name != "" ? var.drbd_volume_name : local.generic_volume_name)
+  drbd_count                     = local.drbd_enabled == true ? 2 : 0
+  drbd_node_vcpu                 = var.drbd_node_vcpu
+  drbd_node_memory               = var.drbd_node_memory
+  bridge                         = "br0"
+  drbd_ips                       = local.drbd_ips
+  drbd_cluster_vip               = local.drbd_cluster_vip
+  drbd_disk_size                 = var.drbd_disk_size
+  drbd_cluster_fencing_mechanism = var.drbd_cluster_fencing_mechanism
+  sbd_storage_type               = var.sbd_storage_type
+  drbd_sbd_disk_id               = module.drbd_sbd_disk.id
+  iscsi_srv_ip                   = module.iscsi_server.output_data.private_addresses.0
+  isolated_network_id            = local.internal_network_id
+  isolated_network_name          = local.internal_network_name
+  storage_pool                   = var.storage_pool
+  nfs_mounting_point             = var.nfs_mounting_point
+  nfs_export_name                = var.nfs_export_name
 }
